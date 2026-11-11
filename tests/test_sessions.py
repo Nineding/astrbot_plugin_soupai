@@ -17,6 +17,9 @@ class Event:
     def get_group_id(self):
         return self.group
 
+    def get_platform_name(self):
+        return "test"
+
     def plain_result(self, text):
         return text
 
@@ -66,6 +69,40 @@ async def test_mixed_answer_is_counted_without_revealing_progress(plugin):
     assert game["question_count"] == 1
     assert game["knowed_answer"] == "＊＊＊＊"
     assert event.sent == ["是或不是（1/15）"]
+
+
+@pytest.mark.parametrize("mode", ["question", "verification"])
+async def test_qq_reply_uses_trigger_message_id(plugin, mode):
+    from astrbot.api.event import MessageChain
+    from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+        AiocqhttpMessageEvent,
+    )
+
+    game = start(plugin)
+    event = Event()
+    event.get_platform_name = lambda: "aiocqhttp"
+    event.message_obj = SimpleNamespace(message_id="-12345")
+    event.chain_result = lambda chain: MessageChain(chain=chain)
+    if mode == "question":
+        plugin.judge_question = AsyncMock(return_value=judging.Judgment("ok", "是"))
+        await plugin._handle_question_in_session(event, "a", Controller(), "原问题")
+        expected = "是（1/15）"
+    else:
+        judgment = judging.Judgment("ok", "部分正确")
+        plugin.verify_user_guess = AsyncMock(
+            return_value=plugin_module.VerificationResult(
+                "部分正确", "固定评价", False, judgment=judgment
+            )
+        )
+        await plugin._handle_verification_in_session(event, "推理", game["answer"])
+        expected = (
+            "等级：部分正确\n评价：固定评价\n\n验证未通过，本阶段剩余 1 次验证机会。"
+        )
+    assert len(event.sent) == 1
+    assert await AiocqhttpMessageEvent._parse_onebot_json(event.sent[0]) == [
+        {"type": "reply", "data": {"id": "-12345"}},
+        {"type": "text", "data": {"text": expected}},
+    ]
 
 
 async def test_history_correction_is_public_and_persisted_without_evidence(plugin):

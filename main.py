@@ -7,7 +7,7 @@ from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
-from astrbot.api.message_components import At
+from astrbot.api.message_components import At, Plain, Reply
 from astrbot.api.provider import LLMResponse
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.utils.session_waiter import (
@@ -448,7 +448,7 @@ class GroupSessionFilter(SessionFilter):
     "astrbot_plugin_soupai",
     "KONpiGG",
     "AI 海龟汤推理游戏插件，支持自动生成谜题、智能判断、验证系统、智能提示、存储库管理等功能。网络题库包含近300道海龟汤，还在持续更新中。",
-    "1.1.0",
+    "1.1.1",
     "https://github.com/Nineding/astrbot_plugin_soupai",
 )
 class SoupaiPlugin(Star):
@@ -1488,6 +1488,15 @@ class SoupaiPlugin(Star):
         self.game_state.end_game(group_id)
         logger.info(f"游戏已结束，群ID: {group_id}")
 
+    @staticmethod
+    def _answer_result(event: AstrMessageEvent, text: str) -> MessageEventResult:
+        """Quote the triggering message on QQ when its ID is available."""
+        if event.get_platform_name() == "aiocqhttp":
+            message_id = getattr(event.message_obj, "message_id", None)
+            if message_id:
+                return event.chain_result([Reply(id=message_id), Plain(text=text)])
+        return event.plain_result(text)
+
     async def _handle_question_in_session(
         self,
         event: AstrMessageEvent,
@@ -1520,7 +1529,7 @@ class SoupaiPlugin(Star):
         if self.game_state.get_game(group_id) is not game:
             return
         if result.status != "ok":
-            await event.send(event.plain_result(result.response))
+            await event.send(self._answer_result(event, result.response))
             controller.keep(timeout=self.game_timeout, reset_timeout=True)
             return
 
@@ -1552,7 +1561,7 @@ class SoupaiPlugin(Star):
             reply += f"（{game['question_count']}/{limit}）"
             if game["question_count"] >= limit:
                 reply += "\n提问次数已用完，你有2次验证机会，请使用 /验证 <推理内容>。"
-        await event.send(event.plain_result("\n".join([*notices, reply])))
+        await event.send(self._answer_result(event, "\n".join([*notices, reply])))
         if self.game_state.get_game(group_id) is game:
             controller.keep(timeout=self.game_timeout, reset_timeout=True)
 
@@ -1689,8 +1698,9 @@ class SoupaiPlugin(Star):
                     if question_limit is not None and question_count >= question_limit:
                         remaining = 2 - game.get("verification_attempts", 0)
                         await event.send(
-                            event.plain_result(
-                                f"❗️提问次数已用完，请使用 /验证 进行猜测（剩余{remaining}次验证机会）"
+                            self._answer_result(
+                                event,
+                                f"❗️提问次数已用完，请使用 /验证 进行猜测（剩余{remaining}次验证机会）",
                             )
                         )
                         return
@@ -2192,7 +2202,7 @@ class SoupaiPlugin(Star):
         )
         limited = game.get("difficulty", "普通") != "简单"
         if limited and game.get(counter, 0) >= 2:
-            await event.send(event.plain_result("已经没有验证次数了。"))
+            await event.send(self._answer_result(event, "已经没有验证次数了。"))
             return
         result = await self.verify_user_guess(
             user_guess,
@@ -2205,7 +2215,7 @@ class SoupaiPlugin(Star):
             return
         judgment = result.judgment
         if judgment is None or judgment.status != "ok":
-            await event.send(event.plain_result(result.comment))
+            await event.send(self._answer_result(event, result.comment))
             return
         notices = []
         for correction in judgment.corrections:
@@ -2235,7 +2245,7 @@ class SoupaiPlugin(Star):
                 )
             else:
                 response += f"\n\n验证未通过，本阶段剩余 {remaining} 次验证机会。"
-        await event.send(event.plain_result(response))
+        await event.send(self._answer_result(event, response))
 
     # 📊 游戏状态查询
     @filter.command("汤状态")

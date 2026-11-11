@@ -5,13 +5,28 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import monotonic
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 ANSWERS = frozenset({"是", "否", "是或不是", "不重要"})
+COMPOUND_MARKERS = (
+    "，",
+    ",",
+    "；",
+    ";",
+    "。",
+    "\n",
+    "但",
+    "并且",
+    "而且",
+    "或者",
+    "如果",
+    "因为",
+    "所以",
+)
 LEVEL_COMMENTS = {
     "完全还原": "核心事实和因果关系已完整还原。",
     "核心推理正确": "主要推理方向正确，部分环节尚未完整还原。",
@@ -19,7 +34,7 @@ LEVEL_COMMENTS = {
     "基本不符": "目前的推理与故事真相明显不符。",
 }
 STATUS_MESSAGES = {
-    "unknown": "汤底未交代，无法确定。请换一个问题，不扣次数。",
+    "unknown": "线索不足，暂时无法确定。本次不扣次数。",
     "clarify": "请明确问题中的人物、对象或条件后再试，不扣次数。",
     "error": "裁判暂时无法取得可靠的一致判断，请稍后重试，不扣次数。",
 }
@@ -53,7 +68,7 @@ evidence 必须是 source.puzzle 或 source.answer 的逐字连续原文摘录�
 claim 写本次待核验命题，verdict 为 supported/contradicted/conditional/unknown/irrelevant/missing。
 importance 为 core/detail；core 表示影响核心事实、人物身份、动机、关键反转或因果。
 supported、contradicted、conditional、missing 必须有原文 evidence；unknown/irrelevant 可无证据。
-没有写明且不能从原文必然推导的重要事实，判 unknown，不能以“不重要”掩盖不知道。
+对于重要事实，只有现有线索无法区分会改变答案的合理解释时才判 unknown，不能以“不重要”掩盖不知道。
 指代、时间或对象确实有多种解释，且历史无法消歧，判 clarify，不要擅自选一种解释。
 只问到真相一部分不代表错误；不要要求每个问题完整复述故事。
 问题分类：
@@ -82,6 +97,14 @@ supported、contradicted、conditional、missing 必须有原文 evidence；unkn
  "checks":[{"claim":"原子命题","verdict":"supported|contradicted|conditional|unknown|irrelevant|missing",
  "importance":"core|detail","evidence":["原文摘录"]}],
  "corrections":[{"index":1,"answer":"是|否|是或不是|不重要","evidence":["原文摘录"]}]}
+"""
+
+QUESTION_INFERENCE = """
+日常问答优先依据线索推断。原文没有直接写出结论时，结合叙事情境和通常语义，按最有依据的解释作答。
+证据引用支持推断的原句，原句无需包含推断得出的数字、身份、关系或结论。不要凭空添加人物或事件。
+问“整个故事是不是只有一个人”时，默认统计参与故事事件的人物。合并同一人的姓名、身份和代词，计入事件明确涉及或必然涉及的人，不设想故事之外的旁观者。
+例如只写“小林进屋后按下开关”，可判故事只有一个人。若写“男人向酒保要水”，可判故事不止一个人，即使原文从未写总人数。
+对于无法从线索区分的关键细节，例如灯不亮但原文无法区分停电和灯泡损坏，才使用 unknown。
 """
 
 
@@ -216,7 +239,7 @@ def parse_judgment(
 
 
 class JudgeEngine:
-    """Run independent judgments with at most three bounded provider calls."""
+    """Review uncertain questions and verify solutions with independent judgments."""
 
     def __init__(self, provider: Any, reviewer: Any = None, timeout: float = 120):
         self.provider = provider
@@ -280,7 +303,7 @@ class JudgeEngine:
         hints: list | None = None,
         facts: list | None = None,
     ) -> Judgment:
-        """Require agreement between independently checked, validated decisions.
+        """Return clear single checks directly and review more complex decisions.
 
         Args:
             mode: Question or verification task.
@@ -292,7 +315,7 @@ class JudgeEngine:
             facts: Optional source-backed index prepared at game start.
 
         Returns:
-            An agreed result, or a fixed retry response without consuming a turn.
+            A validated result, or a fixed retry response without consuming a turn.
         """
         if mode not in {"question", "verification"}:
             raise ValueError("Unknown judgment mode")
@@ -309,17 +332,19 @@ class JudgeEngine:
             "public_hints": hints or [],
             "fact_index": facts or [],
         }
-        decisions: list[Judgment] = []
-        for attempt in range(3):
+
+        async def ask(
+            attempt: int, candidates: tuple[Judgment, ...] = ()
+        ) -> Judgment | None:
             prompt = dict(payload)
-            instruction = RULES
+            instruction = RULES + QUESTION_INFERENCE if mode == "question" else RULES
             if attempt == 1:
                 instruction += "\n你担任独立复核裁判，独立重新拆分命题并从原文核验，尤其检查正确事实掩盖的错误原因或身份。"
             elif attempt == 2:
                 instruction += "\n前次裁判可能分歧或格式错误。你担任证据裁决，重新核验原文，不要因多数、候选等级或候选断言而接受没有依据的结论。"
                 prompt["untrusted_candidates"] = [
                     {"status": item.status, "label": item.label, "checks": item.checks}
-                    for item in decisions
+                    for item in candidates
                 ]
             try:
                 response = await asyncio.wait_for(
@@ -333,42 +358,64 @@ class JudgeEngine:
                     ),
                     self.timeout,
                 )
-                result = parse_judgment(
+                return parse_judgment(
                     response.completion_text, mode, puzzle, answer, history
                 )
-                decisions.append(result)
             except ValueError as error:
                 logger.warning("Judgment attempt %s rejected: %s", attempt + 1, error)
-                continue
             except Exception as error:
                 logger.warning(
                     "Judgment attempt %s failed (%s)", attempt + 1, type(error).__name__
                 )
-                continue
-            matching = [
-                item
-                for item in decisions
-                if (item.status, item.label) == (result.status, result.label)
-            ]
-            if len(matching) >= 2:
-                corrections = tuple(
-                    correction
-                    for correction in matching[0].corrections
-                    if all(
-                        any(
-                            other["index"] == correction["index"]
-                            and other["answer"] == correction["answer"]
-                            for other in match.corrections
-                        )
-                        for match in matching[1:]
-                    )
-                )
-                return Judgment(
-                    result.status,
-                    result.label,
-                    result.checks,
-                    corrections,
-                    attempt + 1,
-                    monotonic() - started,
-                )
-        return Judgment("error", calls=3, elapsed=monotonic() - started)
+            return None
+
+        question_text = content.rstrip("？?。！! \t\r\n")
+        compound = any(marker in question_text for marker in COMPOUND_MARKERS)
+        if mode == "verification" or compound:
+            first, second = await asyncio.gather(ask(0), ask(1))
+        else:
+            first = await ask(0)
+            if (
+                first is not None
+                and first.status == "ok"
+                and first.label in {"是", "否", "不重要"}
+                and len(first.checks) == 1
+                and not first.corrections
+            ):
+                return replace(first, calls=1, elapsed=monotonic() - started)
+            second = await ask(1)
+
+        calls = 2
+        result = second
+        agreement = first
+        if (
+            first is None
+            or second is None
+            or (first.status, first.label) != (second.status, second.label)
+        ):
+            candidates = tuple(item for item in (first, second) if item is not None)
+            result = await ask(2, candidates)
+            calls = 3
+            agreement = next(
+                (
+                    item
+                    for item in candidates
+                    if result is not None
+                    and (item.status, item.label) == (result.status, result.label)
+                ),
+                None,
+            )
+        if result is None or agreement is None:
+            return Judgment("error", calls=calls, elapsed=monotonic() - started)
+
+        agreed_corrections = {
+            (item["index"], item["answer"]) for item in agreement.corrections
+        }
+        corrections = tuple(
+            item
+            for item in result.corrections
+            if (item["index"], item["answer"]) in agreed_corrections
+        )
+        return replace(
+            result, corrections=corrections, calls=calls, elapsed=monotonic() - started
+        )

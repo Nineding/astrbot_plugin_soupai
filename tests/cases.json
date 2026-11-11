@@ -24,6 +24,11 @@
       {
         "content": "他打嗝已经持续了三个小时吗？",
         "expected": "不重要"
+      },
+      {
+        "content": "整个故事是不是只有一个人？",
+        "expected": "否",
+        "critical": true
       }
     ],
     "verifications": [
@@ -183,6 +188,11 @@
             "answer": "是"
           }
         ]
+      },
+      {
+        "content": "车祸和接诊两个情节加起来，直接参与的有三个人吗？",
+        "expected": "是",
+        "critical": true
       }
     ],
     "verifications": [
@@ -346,6 +356,11 @@
       {
         "content": "小林衣服的品牌会影响照明没工作的原因吗？",
         "expected": "不重要"
+      },
+      {
+        "content": "整个故事是不是只有一个人？",
+        "expected": "是",
+        "critical": true
       }
     ],
     "verifications": []

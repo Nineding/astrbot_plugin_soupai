@@ -171,14 +171,42 @@ def test_corrections_need_valid_indices(index):
 
 
 async def test_review_is_independent_and_uses_own_provider():
+    class PrimaryProvider(Provider):
+        async def text_chat(self, **kwargs):
+            await reviewer_started.wait()
+            return await super().text_chat(**kwargs)
+
+    reviewer_started = asyncio.Event()
+
+    class ReviewerProvider(Provider):
+        async def text_chat(self, **kwargs):
+            reviewer_started.set()
+            return await super().text_chat(**kwargs)
+
+    first = PrimaryProvider([completion()])
+    reviewer = ReviewerProvider([completion()])
+    result = await asyncio.wait_for(
+        judging.JudgeEngine(first, reviewer).judge(
+            mode="question",
+            puzzle=PUZZLE,
+            answer=ANSWER,
+            content="他在打嗝，所以才要水吗？",
+        ),
+        timeout=1,
+    )
+    assert (result.status, result.label, result.calls) == ("ok", "是", 2)
+    assert len(first.requests) == len(reviewer.requests) == 1
+    assert "untrusted_candidates" not in json.loads(reviewer.requests[0]["prompt"])
+
+
+async def test_clear_question_needs_only_one_provider_call():
     first = Provider([completion()])
     reviewer = Provider([completion()])
     result = await judging.JudgeEngine(first, reviewer).judge(
         mode="question", puzzle=PUZZLE, answer=ANSWER, content="他在打嗝吗？"
     )
-    assert (result.status, result.label, result.calls) == ("ok", "是", 2)
-    assert len(first.requests) == len(reviewer.requests) == 1
-    assert "untrusted_candidates" not in json.loads(reviewer.requests[0]["prompt"])
+    assert (result.status, result.label, result.calls) == ("ok", "是", 1)
+    assert len(first.requests) == 1 and not reviewer.requests
     assert first.requests[0]["contexts"] == []
 
 
@@ -186,7 +214,10 @@ async def test_disagreement_uses_third_call_and_requires_agreement():
     no = completion("否", checks=[CONTRADICTED])
     provider = Provider([completion(), no, no])
     result = await judging.JudgeEngine(provider).judge(
-        mode="question", puzzle=PUZZLE, answer=ANSWER, content="测试分歧"
+        mode="question",
+        puzzle=PUZZLE,
+        answer=ANSWER,
+        content="他在打嗝，但他被抢劫了吗？",
     )
     assert (result.label, result.calls) == ("否", 3)
     assert len(json.loads(provider.requests[2]["prompt"])["untrusted_candidates"]) == 2
@@ -201,7 +232,10 @@ async def test_unresolved_disagreement_does_not_guess():
         ]
     )
     result = await judging.JudgeEngine(provider).judge(
-        mode="question", puzzle=PUZZLE, answer=ANSWER, content="测试分歧"
+        mode="question",
+        puzzle=PUZZLE,
+        answer=ANSWER,
+        content="他在打嗝，但他被抢劫了吗？",
     )
     assert result.status == "error"
     assert result.calls == 3
