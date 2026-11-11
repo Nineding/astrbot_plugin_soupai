@@ -2,13 +2,13 @@
   "generate_llm_provider": {
     "description": "生成谜题的 LLM 服务商",
     "type": "string",
-    "hint": "留空则使用系统默认的 LLM 服务商。建议使用智力大于等于DeepSeek0-V2 R1的模型。",
+    "hint": "留空使用系统默认的生成模型。建议使用擅长中文故事与因果推理的模型。",
     "default": ""
   },
   "judge_llm_provider": {
     "description": "判断问答和生成提示的 LLM 服务商",
     "type": "string",
-    "hint": "留空则使用系统默认的 LLM 服务商。不建议使用reasoning模型",
+    "hint": "留空使用当前会话的默认模型。建议选择擅长中文推理且支持稳定 JSON 输出的模型；判题会进行独立复核。",
     "default": ""
   },
   "game_timeout": {
@@ -46,5 +46,17 @@
       "custom_first",
       "random"
     ]
+  },
+  "review_llm_provider": {
+    "description": "复核与证据裁决的 LLM 服务商",
+    "type": "string",
+    "hint": "留空复用判断模型。可指定另一服务商进行独立复核；每次问答或验证最多三次判定调用。",
+    "default": ""
+  },
+  "reveal_progress": {
+    "description": "显示汤底真相进度",
+    "type": "bool",
+    "hint": "保留本机版本的可选进度功能。默认关闭，仅在有效“是”回答后更新已命中的关键词。",
+    "default": false
   }
-} 
+}

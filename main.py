@@ -1,20 +1,22 @@
-import json
 import asyncio
+import json
 import os
 import threading
-from pathlib import Path
 from datetime import datetime
-from typing import Dict, Optional, Tuple, List
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
-from astrbot.api.star import Context, Star, register, StarTools
+from pathlib import Path
+
+from astrbot.api import AstrBotConfig, logger
+from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
+from astrbot.api.message_components import At
 from astrbot.api.provider import LLMResponse
-from astrbot.api import logger, AstrBotConfig
+from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.utils.session_waiter import (
-    session_waiter,
     SessionController,
     SessionFilter,
+    session_waiter,
 )
-from astrbot.api.message_components import At
+
+from .judging import LEVEL_COMMENTS, JudgeEngine, Judgment
 
 
 # 线程安全的题库管理基类
@@ -39,16 +41,14 @@ class ThreadSafeStoryStorage:
 
         try:
             if self.usage_file.exists():
-                with open(self.usage_file, "r", encoding="utf-8") as f:
+                with open(self.usage_file, encoding="utf-8") as f:
                     self.used_indexes = set(json.load(f))
                 logger.info(
                     f"从 {self.usage_file} 加载了 {len(self.used_indexes)} 个使用记录"
                 )
             else:
                 self.used_indexes = set()
-                logger.info(
-                    f"使用记录文件不存在，创建新的记录: {self.usage_file}"
-                )
+                logger.info(f"使用记录文件不存在，创建新的记录: {self.usage_file}")
         except Exception as e:
             logger.error(f"加载使用记录失败: {e}")
             self.used_indexes = set()
@@ -75,7 +75,7 @@ class ThreadSafeStoryStorage:
             self.save_usage_record()
             logger.info(f"{self.storage_name} 使用记录已重置")
 
-    def get_usage_info(self) -> Dict:
+    def get_usage_info(self) -> dict:
         """获取使用记录信息"""
         with self.lock:
             return {
@@ -87,7 +87,7 @@ class ThreadSafeStoryStorage:
 # 游戏状态管理
 class GameState:
     def __init__(self):
-        self.active_games: Dict[str, Dict] = {}  # 群聊ID -> 游戏状态
+        self.active_games: dict[str, dict] = {}  # 群聊ID -> 游戏状态
 
     def start_game(self, group_id: str, puzzle: str, answer: str, **extra) -> bool:
         """开始游戏，返回是否成功"""
@@ -111,7 +111,7 @@ class GameState:
             return True
         return False
 
-    def get_game(self, group_id: str) -> Optional[Dict]:
+    def get_game(self, group_id: str) -> dict | None:
         """获取游戏状态"""
         return self.active_games.get(group_id)
 
@@ -126,14 +126,14 @@ class NetworkSoupaiStorage(ThreadSafeStoryStorage):
         # 初始化基类
         super().__init__("network_soupai", data_path)
         self.network_file = network_file
-        self.stories: List[Dict] = []
+        self.stories: list[dict] = []
         self.load_stories()
 
     def load_stories(self):
         """从文件加载网络海龟汤故事"""
         try:
             if os.path.exists(self.network_file):
-                with open(self.network_file, "r", encoding="utf-8") as f:
+                with open(self.network_file, encoding="utf-8") as f:
                     self.stories = json.load(f)
                 logger.info(
                     f"从 {self.network_file} 加载了 {len(self.stories)} 个网络海龟汤故事"
@@ -145,7 +145,7 @@ class NetworkSoupaiStorage(ThreadSafeStoryStorage):
             logger.error(f"加载网络海龟汤失败: {e}")
             self.stories = []
 
-    def get_story(self) -> Optional[Tuple[str, str]]:
+    def get_story(self) -> tuple[str, str] | None:
         """从网络题库获取一个故事，避免重复（线程安全）"""
         if not self.stories:
             return None
@@ -179,7 +179,7 @@ class NetworkSoupaiStorage(ThreadSafeStoryStorage):
             )
             return story["puzzle"], story["answer"]
 
-    def get_storage_info(self) -> Dict:
+    def get_storage_info(self) -> dict:
         """获取网络题库信息"""
         usage_info = self.get_usage_info()
         return {
@@ -196,7 +196,7 @@ class LocalSoupaiStorage(ThreadSafeStoryStorage):
         super().__init__("storage_soupai", data_path)
         self.storage_file = storage_file
         self.max_size = max_size
-        self.stories: List[Dict] = []
+        self.stories: list[dict] = []
         self.load_stories()
 
     def load_stories(self):
@@ -208,7 +208,7 @@ class LocalSoupaiStorage(ThreadSafeStoryStorage):
                 else str(self.storage_file)
             )
             if os.path.exists(storage_path):
-                with open(storage_path, "r", encoding="utf-8") as f:
+                with open(storage_path, encoding="utf-8") as f:
                     self.stories = json.load(f)
                 logger.info(f"从 {storage_path} 加载了 {len(self.stories)} 个故事")
             else:
@@ -252,7 +252,7 @@ class LocalSoupaiStorage(ThreadSafeStoryStorage):
             logger.info(f"添加新故事到存储库，当前存储库大小: {len(self.stories)}")
             return True
 
-    def get_story(self) -> Optional[Tuple[str, str]]:
+    def get_story(self) -> tuple[str, str] | None:
         """从存储库获取一个故事，避免重复（线程安全）"""
         if not self.stories:
             return None
@@ -286,7 +286,7 @@ class LocalSoupaiStorage(ThreadSafeStoryStorage):
             )
             return story["puzzle"], story["answer"]
 
-    def get_storage_info(self) -> Dict:
+    def get_storage_info(self) -> dict:
         """获取存储库信息"""
         usage_info = self.get_usage_info()
         return {
@@ -304,7 +304,7 @@ class CustomSoupaiStorage(ThreadSafeStoryStorage):
         # 初始化基类
         super().__init__("custom_soupai", data_path)
         self.storage_file = storage_file
-        self.stories: List[Dict] = []
+        self.stories: list[dict] = []
         self.load_stories()
 
     def load_stories(self):
@@ -316,9 +316,11 @@ class CustomSoupaiStorage(ThreadSafeStoryStorage):
                 else str(self.storage_file)
             )
             if os.path.exists(storage_path):
-                with open(storage_path, "r", encoding="utf-8") as f:
+                with open(storage_path, encoding="utf-8") as f:
                     self.stories = json.load(f)
-                logger.info(f"从 {storage_path} 加载了 {len(self.stories)} 个自定义海龟汤故事")
+                logger.info(
+                    f"从 {storage_path} 加载了 {len(self.stories)} 个自定义海龟汤故事"
+                )
             else:
                 self.stories = []
                 logger.info("自定义海龟汤文件不存在，创建新的存储库")
@@ -338,7 +340,9 @@ class CustomSoupaiStorage(ThreadSafeStoryStorage):
             os.makedirs(os.path.dirname(storage_path), exist_ok=True)
             with open(storage_path, "w", encoding="utf-8") as f:
                 json.dump(self.stories, f, ensure_ascii=False, indent=2)
-            logger.info(f"保存了 {len(self.stories)} 个自定义海龟汤故事到 {storage_path}")
+            logger.info(
+                f"保存了 {len(self.stories)} 个自定义海龟汤故事到 {storage_path}"
+            )
         except Exception as e:
             logger.error(f"保存自定义海龟汤失败: {e}")
 
@@ -355,7 +359,7 @@ class CustomSoupaiStorage(ThreadSafeStoryStorage):
             logger.info(f"添加新自定义海龟汤故事，当前存储库大小: {len(self.stories)}")
             return True
 
-    def get_story(self) -> Optional[Tuple[str, str]]:
+    def get_story(self) -> tuple[str, str] | None:
         """从自定义存储库获取一个故事，避免重复（线程安全）"""
         if not self.stories:
             return None
@@ -389,7 +393,7 @@ class CustomSoupaiStorage(ThreadSafeStoryStorage):
             )
             return story["puzzle"], story["answer"]
 
-    def get_storage_info(self) -> Dict:
+    def get_storage_info(self) -> dict:
         """获取自定义存储库信息"""
         usage_info = self.get_usage_info()
         return {
@@ -403,12 +407,20 @@ class CustomSoupaiStorage(ThreadSafeStoryStorage):
 class VerificationResult:
     """验证结果类"""
 
-    def __init__(self, level: str, comment: str, is_correct: bool = False):
+    def __init__(
+        self,
+        level: str,
+        comment: str,
+        is_correct: bool = False,
+        *,
+        judgment: Judgment | None = None,
+    ):
         self.level = level
         self.comment = comment
         self.is_correct = is_correct
+        self.judgment = judgment
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         return {
             "level": self.level,
             "comment": self.comment,
@@ -436,8 +448,8 @@ class GroupSessionFilter(SessionFilter):
     "astrbot_plugin_soupai",
     "KONpiGG",
     "AI 海龟汤推理游戏插件，支持自动生成谜题、智能判断、验证系统、智能提示、存储库管理等功能。网络题库包含近300道海龟汤，还在持续更新中。",
-    "1.0.3",
-    "https://github.com/KONpiGG/astrbot_plugin_soupai",
+    "1.1.0",
+    "https://github.com/Nineding/astrbot_plugin_soupai",
 )
 class SoupaiPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -448,6 +460,7 @@ class SoupaiPlugin(Star):
         # 获取配置值
         self.generate_llm_provider_id = self.config.get("generate_llm_provider", "")
         self.judge_llm_provider_id = self.config.get("judge_llm_provider", "")
+        self.review_llm_provider_id = self.config.get("review_llm_provider", "")
         self.game_timeout = self.config.get("game_timeout", 300)
         self.storage_max_size = self.config.get("storage_max_size", 50)
         self.auto_generate_start = self.config.get("auto_generate_start", 3)
@@ -459,6 +472,8 @@ class SoupaiPlugin(Star):
         if self.puzzle_source_strategy == "ai_first":
             self.puzzle_source_strategy = "local_first"
 
+        # 汤底真相进度开关
+        self.reveal_progress = self.config.get("reveal_progress", False)
 
         # 难度设置
         self.difficulty_settings = {
@@ -468,7 +483,7 @@ class SoupaiPlugin(Star):
                 "hint_limit": 10,
             },
             "普通": {
-                "limit": 35,
+                "limit": None,
                 "accept_levels": ["完全还原"],
                 "hint_limit": 5,
             },
@@ -483,7 +498,7 @@ class SoupaiPlugin(Star):
                 "hint_limit": 0,
             },
         }
-        self.group_difficulty: Dict[str, str] = {}
+        self.group_difficulty: dict[str, str] = {}
 
         # 数据存储路径: 使用框架提供的工具获取插件数据目录
         self.data_path = StarTools.get_data_dir()
@@ -500,6 +515,8 @@ class SoupaiPlugin(Star):
         # 自动生成状态
         self.auto_generating = False
         self.auto_generate_task = None
+        self.auto_schedule_task = None
+        self._session_tasks: set[asyncio.Task] = set()
 
     def _ensure_story_storages(self) -> None:
         """确保题库存储被初始化。
@@ -525,9 +542,7 @@ class SoupaiPlugin(Star):
 
         if self.custom_story_storage is None:
             custom_file = self.data_path / "custom_soupai.json"
-            self.custom_story_storage = CustomSoupaiStorage(
-                custom_file, self.data_path
-            )
+            self.custom_story_storage = CustomSoupaiStorage(custom_file, self.data_path)
 
     async def init(self, context: Context):
         """插件初始化，此时 self.data_path 可用"""
@@ -537,20 +552,120 @@ class SoupaiPlugin(Star):
         self._ensure_story_storages()
 
         # 启动自动生成任务
-        asyncio.create_task(self._start_auto_generate())
+        self.auto_schedule_task = asyncio.create_task(self._start_auto_generate())
 
         online_info = self.online_story_storage.get_storage_info()
         logger.info(
-            f"海龟汤插件已加载，配置: 生成LLM提供商={self.generate_llm_provider_id}, 判断LLM提供商={self.judge_llm_provider_id}, 超时时间={self.game_timeout}秒, 网络题库={online_info['total']}个谜题, 本地存储库大小={self.storage_max_size}, 谜题来源策略={self.puzzle_source_strategy}"
+            f"海龟汤插件已加载，配置: 生成LLM提供商={self.generate_llm_provider_id}, 判断LLM提供商={self.judge_llm_provider_id}, 超时时间={self.game_timeout}秒, 网络题库={online_info['total']}个谜题, 本地存储库大小={self.storage_max_size}, 谜题来源策略={self.puzzle_source_strategy}, 汤底真相进度={self.reveal_progress}"
         )
 
     async def terminate(self):
-        """插件卸载时清理资源"""
-        # 停止自动生成
+        """Cancel owned sessions and background jobs before unloading the plugin."""
+        self.game_state.active_games.clear()
+        self.generating_games.clear()
         self.auto_generating = False
-        if self.auto_generate_task:
-            self.auto_generate_task.cancel()
-        logger.info("海龟汤插件已卸载呜呜呜呜呜")
+        tasks = set(self._session_tasks)
+        tasks.update(
+            task
+            for task in (self.auto_generate_task, self.auto_schedule_task)
+            if task is not None
+        )
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._session_tasks.clear()
+        logger.info("Soupai sessions and background jobs stopped")
+
+    def mask_answer_with_progress(self, answer: str) -> str:
+        """将答案中除标点符号外的字符替换为█，用于显示真相进度"""
+        import string
+
+        # 定义标点符号（包括中文标点）
+        punctuation = string.punctuation + "，。！？；：''【】（）《》、·…～"
+        result = []
+        for char in answer:
+            if char in punctuation or char.isspace():
+                result.append(char)
+            else:
+                result.append("█")
+        return "".join(result)
+
+    def _merge_reveal_progress(
+        self,
+        knowed_answer: str,
+        revealed_content: str,
+        true_answer: str,
+    ) -> str:
+        """根据 LLM 返回的待揭露片段，在当前进度中揭开对应位置。"""
+        if not revealed_content or revealed_content == "未命中":
+            return knowed_answer
+
+        if len(knowed_answer) != len(true_answer):
+            return knowed_answer
+
+        merged = list(knowed_answer)
+        start = 0
+        has_match = False
+
+        while True:
+            idx = true_answer.find(revealed_content, start)
+            if idx == -1:
+                break
+
+            has_match = True
+            for pos in range(idx, min(idx + len(revealed_content), len(true_answer))):
+                if merged[pos] == "█":
+                    merged[pos] = true_answer[pos]
+            start = idx + 1
+
+        if has_match:
+            return "".join(merged)
+        return knowed_answer
+
+    def _reveal_by_question_match(
+        self,
+        knowed_answer: str,
+        question: str,
+        true_answer: str,
+        max_new_chars: int = 6,
+    ) -> str:
+        """当 LLM 进度更新不可用时，按提问关键词在真相中做保守揭露。"""
+        import re
+
+        if len(knowed_answer) != len(true_answer):
+            return knowed_answer
+
+        # 提取提问中的中英文/数字关键词，长度>=2 以降低误触发。
+        tokens = re.findall(r"[A-Za-z0-9\u4e00-\u9fff]+", question)
+        tokens = [t for t in tokens if len(t) >= 2]
+        if not tokens:
+            return knowed_answer
+
+        # 优先长词，尽量命中更具体片段。
+        tokens.sort(key=len, reverse=True)
+
+        merged = list(knowed_answer)
+        revealed = 0
+        for token in tokens:
+            start = 0
+            while revealed < max_new_chars:
+                idx = true_answer.find(token, start)
+                if idx == -1:
+                    break
+
+                for pos in range(idx, min(idx + len(token), len(true_answer))):
+                    if revealed >= max_new_chars:
+                        break
+                    if merged[pos] == "█":
+                        merged[pos] = true_answer[pos]
+                        revealed += 1
+                start = idx + 1
+
+            if revealed >= max_new_chars:
+                break
+
+        return "".join(merged)
 
     async def _start_auto_generate(self):
         """启动自动生成任务"""
@@ -619,7 +734,7 @@ class SoupaiPlugin(Star):
                 await asyncio.sleep(300)  # 出错后等待5分钟再试
 
     # ✅ 生成谜题和答案
-    async def generate_story_with_llm(self) -> Tuple[str, str]:
+    async def generate_story_with_llm(self) -> tuple[str, str]:
         """使用 LLM 生成海龟汤谜题"""
 
         # 根据配置获取指定的生成 LLM 提供商
@@ -677,7 +792,7 @@ class SoupaiPlugin(Star):
             # 格式4: 尝试从文本中提取题面和答案
             else:
                 lines = text.split("\n")
-                for i, line in enumerate(lines):
+                for line in lines:
                     line = line.strip()
                     if not line or line.startswith("#"):
                         continue
@@ -825,130 +940,121 @@ class SoupaiPlugin(Star):
             return False
 
     # ✅ 验证用户推理
-    async def verify_user_guess(
-            self, user_guess: str, true_answer: str
-    ) -> VerificationResult:
-        """
-        验证用户推理
+    async def _get_judge_engine(self, umo: str | None = None) -> JudgeEngine:
+        """Resolve configured providers, respecting the current conversation model.
 
         Args:
-            user_guess: 用户的推理内容
-            true_answer: 标准答案
+            umo: Unified message origin of the current event.
 
         Returns:
-            VerificationResult: 验证结果
+            A stateless judge using the selected providers.
+
+        Raises:
+            ValueError: A required provider is unavailable.
         """
-        # 获取判断 LLM 提供商
         if self.judge_llm_provider_id:
             provider = self.context.get_provider_by_id(self.judge_llm_provider_id)
-            if provider is None:
-                logger.error(
-                    f"未找到指定的判断 LLM 提供商: {self.judge_llm_provider_id}"
-                )
-                return VerificationResult("验证失败", "未配置判断 LLM，无法验证")
         else:
-            provider = self.context.get_using_provider()
-            if provider is None:
-                return VerificationResult("验证失败", "未配置 LLM，无法验证")
+            resolver = getattr(self.context, "get_using_provider_async", None)
+            if resolver is not None:
+                provider = await resolver(umo=umo)
+            else:
+                provider = self.context.get_using_provider(umo=umo)
+        if provider is None:
+            raise ValueError("Judgment provider unavailable")
+        reviewer = provider
+        if self.review_llm_provider_id:
+            reviewer = self.context.get_provider_by_id(self.review_llm_provider_id)
+            if reviewer is None:
+                raise ValueError("Review provider unavailable")
+        return JudgeEngine(provider, reviewer)
 
-        # 构建验证提示词
-        system_prompt = self._build_verification_system_prompt()
-        user_prompt = self._build_verification_user_prompt(user_guess, true_answer)
+    async def verify_user_guess(
+        self,
+        user_guess: str,
+        true_answer: str,
+        *,
+        puzzle: str = "",
+        game: dict | None = None,
+        umo: str | None = None,
+    ) -> VerificationResult:
+        """Verify a submitted solution without exposing model-generated evidence.
 
+        Args:
+            user_guess: Submitted explanation.
+            true_answer: Original solution.
+            puzzle: Original puzzle.
+            game: Current game state, including public history and private facts.
+            umo: Current conversation origin for provider selection.
+
+        Returns:
+            A fixed public grade, or a retry result which consumes no attempt.
+        """
+        state = game or {}
         try:
-            logger.info(f"开始验证用户推理: '{user_guess[:50]}...'")
-
-            llm_resp: LLMResponse = await provider.text_chat(
-                prompt=user_prompt,
-                contexts=[],
-                func_tool=None,
-                image_urls=[],
-                system_prompt=system_prompt,
+            engine = await self._get_judge_engine(umo)
+            result = await engine.judge(
+                mode="verification",
+                puzzle=puzzle,
+                answer=true_answer,
+                content=user_guess,
+                history=state.get("qa_history", []),
+                hints=state.get("hint_history", []),
+                facts=state.get("facts", []),
             )
+        except Exception as error:
+            logger.warning(
+                f"Solution verification unavailable ({type(error).__name__})"
+            )
+            result = Judgment("error")
+        if result.status != "ok":
+            return VerificationResult("验证失败", result.response, judgment=result)
+        return VerificationResult(
+            result.label,
+            LEVEL_COMMENTS[result.label],
+            result.label in {"完全还原", "核心推理正确"},
+            judgment=result,
+        )
 
-            text = llm_resp.completion_text.strip()
-            logger.info(f"验证 LLM 返回内容: {text}")
+    async def judge_question(
+        self,
+        puzzle: str,
+        question: str,
+        true_answer: str,
+        *,
+        game: dict | None = None,
+        umo: str | None = None,
+    ) -> Judgment:
+        """Judge a question against source and history using independent review.
 
-            # 解析验证结果
-            result = self._parse_verification_result(text)
-            return result
+        Args:
+            puzzle: Original puzzle text.
+            question: Player question or statement.
+            true_answer: Original solution text.
+            game: Current game state.
+            umo: Current conversation origin.
 
-        except Exception as e:
-            logger.error(f"验证用户推理失败: {e}")
-            return VerificationResult("验证失败", f"验证过程中发生错误: {e}")
-
-    def _build_verification_system_prompt(self) -> str:
-        """构建验证系统提示词"""
-        return """你是一个推理游戏的裁判。玩家需要还原一个隐藏的完整故事，你的任务是根据玩家的陈述与标准答案对比，判断其相似程度。
-
-你的任务是对这两个内容进行比较，判断它们在"核心因果逻辑、关键行为动机、事件结果解释"方面是否一致。
-
-请根据相似程度将玩家推理划分为以下四个等级之一：
-
-1. 完全还原：核心逻辑、动机、因果链、关键行为全部准确复原，无明显偏差；
-2. 核心推理正确：主干因果逻辑清晰、关键转折已被识别，但部分细节错误或过程含混；
-3. 部分正确：推理中包含部分正确线索或行为判断，但整体逻辑不完整或动机解释偏离；
-4. 基本不符：推理内容与真相不符，逻辑错误严重，无法解释题面设定。
-
-请输出以下格式：
-等级：{等级}
-评价：{一句简评}
-
-注意：
-- 当等级为"完全还原"或"核心推理正确"时，表示玩家基本猜中了故事真相。
-- 评价应中立简洁，仅反映玩家推理的整体完成度、偏离程度或结构性问题。  
-- 严禁直接或间接泄露正确答案中的信息，包括行为动机、情节真相、因果反转等。  
-- 不得使用带有暗示性的语句，如"其实…"、"你忽略了…"、"正确是…"等。
-- 只输出等级和评价，不要添加其他内容。"""
-
-    def _build_verification_user_prompt(self, user_guess: str, true_answer: str) -> str:
-        """构建验证用户提示词"""
-        return f"""标准答案是：
-{true_answer}
-
-玩家还原的推理是：
-{user_guess}
-
-请判断其等级和简评。"""
-
-    def _parse_verification_result(self, text: str) -> VerificationResult:
-        """解析验证结果"""
+        Returns:
+            A validated result whose response contains no private evidence.
+        """
+        state = game or {}
         try:
-            # 提取等级和评价
-            lines = text.strip().split("\n")
-            level = ""
-            comment = ""
+            engine = await self._get_judge_engine(umo)
+            return await engine.judge(
+                mode="question",
+                puzzle=puzzle,
+                answer=true_answer,
+                content=question,
+                history=state.get("qa_history", []),
+                hints=state.get("hint_history", []),
+                facts=state.get("facts", []),
+            )
+        except Exception as error:
+            logger.warning(f"Question judgment unavailable ({type(error).__name__})")
+            return Judgment("error")
 
-            for line in lines:
-                line = line.strip()
-                if line.startswith("等级："):
-                    level = line.replace("等级：", "").strip()
-                elif line.startswith("评价："):
-                    comment = line.replace("评价：", "").strip()
-
-            # 判断是否猜中
-            is_correct = level in ["完全还原", "核心推理正确"]
-
-            if not level or not comment:
-                # 如果解析失败，尝试从文本中提取信息
-                if "完全还原" in text or "核心推理正确" in text:
-                    level = "核心推理正确" if "核心推理正确" in text else "完全还原"
-                    comment = "推理基本正确，但解析结果格式异常"
-                    is_correct = True
-                else:
-                    level = "验证失败"
-                    comment = "无法解析验证结果"
-                    is_correct = False
-
-            return VerificationResult(level, comment, is_correct)
-
-        except Exception as e:
-            logger.error(f"解析验证结果失败: {e}")
-            return VerificationResult("验证失败", f"解析验证结果时发生错误: {e}")
-
-    # ✅ 判断提问的回答方式
-    async def judge_question(self, question: str, true_answer: str) -> str:
-        """使用 LLM 判断用户提问的回答方式"""
+    async def refine_keywords(self, true_answer: str) -> list[str]:
+        """使用 LLM 在开局时提炼汤底关键词"""
 
         # 根据配置获取指定的判断 LLM 提供商
         if self.judge_llm_provider_id:
@@ -957,36 +1063,20 @@ class SoupaiPlugin(Star):
                 logger.error(
                     f"未找到指定的判断 LLM 提供商: {self.judge_llm_provider_id}"
                 )
-                return "（未配置判断 LLM，无法判断）"
+                return []
         else:
             provider = self.context.get_using_provider()
             if provider is None:
-                return "（未配置 LLM，无法判断）"
+                return []
 
         prompt = (
             f"海龟汤游戏规则：\n"
-            f"1. 故事的完整真相是：{true_answer}\n"
-            f'2. 玩家提问或陈述："{question}"\n'
-            f"3. 你的任务是判断玩家的说法是否符合真相。\n"
-            f"4. 只能回答：\"是\"、\"否\"、\"不重要\"或\"是也不是\"。\n\n"
-            f"判定标准：\n"
-            f"- \"是\"：\n"
-            f"  玩家命中关键事实或行为，且该信息能直接帮助接近真相。缺少部分细节可以忽略，只要不影响推理方向，就判\"是\"。\n"
-            f"- \"否\"：\n"
-            f"  与真相完全不符，或包含明显错误，会使玩家推理走向错误方向。\n"
-            f"- \"不重要\"：\n"
-            f"  与故事真相无关，或该信息无法推动推理进展。\n"
-            f"- \"是也不是\"：\n"
-            f"  玩家命中部分事实，但：\n"
-            f"    1) 因果关系不完整或存在偏差；\n"
-            f"    2) 表述中包含可能让玩家推理错误的成分；\n"
-            f"    3) 忽略了与当前描述直接相关的重要关键点。\n"
-            f"  如果只是缺少背景信息，但不影响方向，优先判\"是\"而不是\"是也不是\"。\n\n"
-            f"额外说明：\n"
-            f"- 不要求玩家一次性说出全部真相。\n"
-            f"- 允许玩家只描述真相的一部分，只要方向正确且不会误导，就判\"是\"。\n"
-            f"- 对可能误导玩家的陈述要谨慎，宁可判\"是也不是\"。\n"
-            f"- 判定时平衡游戏流畅性和推理挑战性。"
+            f"故事的完整真相是：{true_answer}\n"
+            f"任务: 从真相中提炼 8-15 个用于命中判断的关键词或短词。\n"
+            f"要求:\n"
+            f"1. 关键词应尽量是名词、动词或关键短语，长度 2-8 字；\n"
+            f"2. 不要输出整句，不要输出解释；\n"
+            f"3. 仅输出关键词，用英文逗号分隔，例如：镜子,墓地,梦游,香水\n"
         )
 
         try:
@@ -995,21 +1085,38 @@ class SoupaiPlugin(Star):
                 contexts=[],
                 func_tool=None,
                 image_urls=[],
-                system_prompt='你是一个海龟汤推理游戏的助手。你必须严格按照游戏规则回答，只能回答"是"、"否"、"不重要"或"是也不是"，不能添加任何其他内容。',
+                system_prompt="你是一个海龟汤推理游戏的助手。你必须严格按照游戏规则输出内容不能有任何的情感，不能有任何联想。",
             )
 
-            valid_responses = {"是", "否", "是也不是", "不重要"}
             reply = llm_resp.completion_text.strip()
-            if reply in valid_responses:
-                return reply
-            return "你给ai干宕机了或者有什么其他原因，反正他没好好回复，我也不知道为什么（我努力修过代码了）"
+            if not reply:
+                return []
+
+            raw_keywords = (
+                reply.replace("，", ",")
+                .replace("、", ",")
+                .replace("\n", ",")
+                .split(",")
+            )
+
+            keywords: list[str] = []
+            for kw in raw_keywords:
+                item = kw.strip().strip("。；;:：")
+                if len(item) < 2 or len(item) > 12:
+                    continue
+                if item not in keywords:
+                    keywords.append(item)
+
+            return keywords
 
         except Exception as e:
             logger.error(f"判断问题失败: {e}")
-            return "（判断失败，请重试）"
+            return []
 
     # ✅ 生成方向性提示
-    def build_allow_list(self, puzzle: str, qa_history: List[Dict[str, str]]) -> List[str]:
+    def build_allow_list(
+        self, puzzle: str, qa_history: list[dict[str, str]]
+    ) -> list[str]:
         """根据题面和历史问答构建允许在提示中出现的名词列表"""
         import re
 
@@ -1022,7 +1129,7 @@ class SoupaiPlugin(Star):
         # 提取连续的中文、字母或数字片段作为候选名词
         tokens = re.findall(r"[A-Za-z0-9\u4e00-\u9fff]+", text)
 
-        allow: List[str] = []
+        allow: list[str] = []
         for token in tokens:
             if not token:
                 continue
@@ -1035,12 +1142,12 @@ class SoupaiPlugin(Star):
         return allow
 
     async def generate_hint(
-            self,
-            puzzle: str,
-            true_answer: str,
-            qa_history: List[Dict[str, str]],
-            hint_history: List[str],
-            allow_list: List[str],
+        self,
+        puzzle: str,
+        true_answer: str,
+        qa_history: list[dict[str, str]],
+        hint_history: list[str],
+        allow_list: list[str],
     ) -> str:
         """根据本局已记录的问答与提示生成新的方向性提示"""
         if self.judge_llm_provider_id:
@@ -1061,7 +1168,7 @@ class SoupaiPlugin(Star):
         hint_text = "\n".join(hint_history) if hint_history else "（无）"
         allow_text = ", ".join(allow_list) if allow_list else "（无）"
         prompt = (
-            "你是\"海龟汤\"提示生成器。你知道完整真相（仅供内部推理，严禁外泄）。\n"
+            '你是"海龟汤"提示生成器。你知道完整真相（仅供内部推理，严禁外泄）。\n'
             "材料：\n\n"
             f"* 题面：{puzzle}\n"
             f"* 完整真相（不可外泄）：{true_answer}\n"
@@ -1088,7 +1195,7 @@ class SoupaiPlugin(Star):
             )
             text = llm_resp.completion_text.strip()
             if text.startswith("提示："):
-                text = text[len("提示："):]
+                text = text[len("提示：") :]
             return text
         except Exception as e:
             logger.error(f"生成提示失败: {e}")
@@ -1112,17 +1219,42 @@ class SoupaiPlugin(Star):
         self.group_difficulty[group_id] = level
         yield event.plain_result(f"难度已设置为 {level}")
 
+    @filter.command("汤进度开关")
+    async def toggle_reveal_progress(self, event: AstrMessageEvent, action: str = ""):
+        """切换汤底真相进度功能"""
+        group_id = event.get_group_id()
+        if not group_id:
+            yield event.plain_result("此功能只能在群聊中使用")
+            return
+        if self.game_state.is_game_active(group_id):
+            yield event.plain_result("当前有活跃游戏，无法修改设置")
+            return
+
+        if action.lower() in ["开", "启用", "on", "true", "1"]:
+            self.reveal_progress = True
+            yield event.plain_result(
+                "✅ 汤底真相进度功能已启用，下一局游戏将显示真相进度"
+            )
+        elif action.lower() in ["关", "禁用", "off", "false", "0"]:
+            self.reveal_progress = False
+            yield event.plain_result("❌ 汤底真相进度功能已禁用")
+        else:
+            status = "已启用" if self.reveal_progress else "已禁用"
+            yield event.plain_result(
+                f"汤底真相进度功能当前{status}\n使用语法: /汤进度开关 [开|关]"
+            )
+
     # 🎮 开始游戏指令
     @filter.command("汤")
     async def start_soupai_game(self, event: AstrMessageEvent):
         """开始海龟汤游戏
-        
+
         使用格式: /汤 [题库类型] [题号]
-        
+
         参数说明:
         - 题库类型 (可选): network(网络题库), storage(本地存储库), custom(自定义题库)
         - 题号 (可选): 指定题库中的题目索引，从0开始
-        
+
         示例:
         /汤                    # 使用配置的策略随机获取谜题
         /汤 network           # 从网络题库随机获取谜题
@@ -1160,20 +1292,20 @@ class SoupaiPlugin(Star):
             # 解析命令参数
             message_content = event.message_str.strip()
             args = message_content.split()[1:]  # 去掉命令本身
-            
+
             story = None
             source_type = None
             puzzle_index = None
-            
+
             # 解析参数格式: /汤 <network|storage|custom> <题号>
             # 两个参数都是可选的
             if len(args) >= 1:
                 first_arg = args[0].lower()
-                
+
                 # 检查第一个参数是否是题库类型
                 if first_arg in ["network", "local", "custom"]:
                     source_type = first_arg
-                    
+
                     # 检查是否有第二个参数（题号）
                     if len(args) >= 2:
                         try:
@@ -1202,13 +1334,15 @@ class SoupaiPlugin(Star):
             else:
                 # 没有参数，使用配置的策略随机获取
                 source_type = "current"
-            
+
             # 根据解析的参数获取故事
             if puzzle_index is not None:
                 # 指定了题号，从特定题库获取
                 story = await self.get_story_by_index(source_type, puzzle_index)
                 if not story:
-                    yield event.plain_result(f"{source_type}题库中没有第 {puzzle_index} 号题目")
+                    yield event.plain_result(
+                        f"{source_type}题库中没有第 {puzzle_index} 号题目"
+                    )
                     self.generating_games.discard(group_id)
                     return
             else:
@@ -1226,10 +1360,11 @@ class SoupaiPlugin(Star):
                     elif source_type == "custom":
                         story = self.custom_story_storage.get_story()
                     else:
-                        yield event.plain_result("题库类型参数错误，请使用 network/local/custom")
+                        yield event.plain_result(
+                            "题库类型参数错误，请使用 network/local/custom"
+                        )
                         self.generating_games.discard(group_id)
                         return
-
 
             if not story:
                 yield event.plain_result("获取谜题失败，请重试")
@@ -1244,23 +1379,41 @@ class SoupaiPlugin(Star):
                 self.generating_games.discard(group_id)
                 return
 
-
             difficulty = self.group_difficulty.get(group_id, "普通")
             diff_conf = self.difficulty_settings.get(
                 difficulty, self.difficulty_settings["普通"]
             )
 
+            # 初始化知道的答案（如果启用真相进度功能）
+            knowed_answer = (
+                self.mask_answer_with_progress(answer) if self.reveal_progress else None
+            )
+            answer_keywords: list[str] = []
+            if self.reveal_progress:
+                answer_keywords = await self.refine_keywords(answer)
+
+            facts = []
+            try:
+                engine = await self._get_judge_engine(event.unified_msg_origin)
+                facts = await engine.prepare_facts(puzzle, answer)
+            except Exception as error:
+                logger.warning(f"Fact index unavailable ({type(error).__name__})")
+
             if self.game_state.start_game(
-                    group_id,
-                    puzzle,
-                    answer,
-                    difficulty=difficulty,
-                    question_limit=diff_conf["limit"],
-                    question_count=0,
-                    verification_attempts=0,
-                    accept_levels=diff_conf["accept_levels"],
-                    hint_limit=diff_conf.get("hint_limit"),
-                    hint_count=0,
+                group_id,
+                puzzle,
+                answer,
+                difficulty=difficulty,
+                question_limit=diff_conf["limit"],
+                question_count=0,
+                verification_attempts=0,
+                early_verification_attempts=0,
+                facts=facts,
+                accept_levels=diff_conf["accept_levels"],
+                hint_limit=diff_conf.get("hint_limit"),
+                hint_count=0,
+                knowed_answer=knowed_answer,
+                answer_keywords=answer_keywords,
             ):
                 extra = ""
                 if diff_conf["limit"] is not None:
@@ -1276,9 +1429,14 @@ class SoupaiPlugin(Star):
                 else:
                     extra += "）"
 
-                yield event.plain_result(
-                    f"🎮 海龟汤游戏开始！{extra}\n\n📖 题面：{puzzle}\n\n💡 请直接提问或陈述，我会回答：是、否、是也不是\n💡 输入 /提示 可以获取方向性提示\n💡 输入 /验证 <答案> 可以验证答案是否正确\n💡 输入 /揭晓 可以查看完整故事"
-                )
+                # 构建游戏开始消息
+                game_msg = f"🎮 海龟汤游戏开始！{extra}\n\n📖 题面：{puzzle}\n\n💡 请直接提问或陈述，我会回答：是、否、是或不是、不重要\n💡 输入 /提示 可以获取方向性提示\n💡 输入 /验证 <答案> 可以验证答案是否正确\n💡 输入 /揭晓 可以查看完整故事"
+
+                # 如果启用了真相进度，在游戏开始时显示
+                if self.reveal_progress and knowed_answer:
+                    game_msg += f"\n\n📍 汤底真相进度如下：\n{knowed_answer}"
+
+                yield event.plain_result(game_msg)
 
                 # 启动会话控制
                 await self._start_game_session(event, group_id, answer)
@@ -1330,16 +1488,87 @@ class SoupaiPlugin(Star):
         self.game_state.end_game(group_id)
         logger.info(f"游戏已结束，群ID: {group_id}")
 
+    async def _handle_question_in_session(
+        self,
+        event: AstrMessageEvent,
+        group_id: str,
+        controller: SessionController,
+        question: str,
+    ) -> None:
+        """Commit only accepted judgments for the same still-active game.
+
+        Args:
+            event: Incoming player event.
+            group_id: Current group identifier.
+            controller: Session timeout controller.
+            question: Player question stripped of surrounding whitespace.
+        """
+        game = self.game_state.get_game(group_id)
+        if game is None:
+            return
+        limit = game.get("question_limit")
+        if limit is not None and game.get("question_count", 0) >= limit:
+            return
+        controller.keep(timeout=self.game_timeout, reset_timeout=True)
+        result = await self.judge_question(
+            game["puzzle"],
+            question,
+            game["answer"],
+            game=game,
+            umo=event.unified_msg_origin,
+        )
+        if self.game_state.get_game(group_id) is not game:
+            return
+        if result.status != "ok":
+            await event.send(event.plain_result(result.response))
+            controller.keep(timeout=self.game_timeout, reset_timeout=True)
+            return
+
+        history = game.setdefault("qa_history", [])
+        notices = []
+        for correction in result.corrections:
+            item = history[correction["index"] - 1]
+            if item["answer"] != correction["answer"]:
+                item.setdefault("original_answer", item["answer"])
+                item["answer"] = correction["answer"]
+                notices.append(
+                    f"更正第{correction['index']}问：{correction['answer']}。"
+                )
+        history.append({"question": question, "answer": result.label})
+        game["question_count"] = game.get("question_count", 0) + 1
+        if result.label == "是" and self.reveal_progress and game.get("knowed_answer"):
+            previous = game["knowed_answer"]
+            for keyword in game.get("answer_keywords", []):
+                if keyword and keyword in question:
+                    game["knowed_answer"] = self._merge_reveal_progress(
+                        game["knowed_answer"],
+                        keyword,
+                        game["answer"],
+                    )
+            if previous != game["knowed_answer"]:
+                notices.append("真相进度已更新。")
+        reply = result.label
+        if limit is not None:
+            reply += f"（{game['question_count']}/{limit}）"
+            if game["question_count"] >= limit:
+                reply += "\n提问次数已用完，你有2次验证机会，请使用 /验证 <推理内容>。"
+        await event.send(event.plain_result("\n".join([*notices, reply])))
+        if self.game_state.get_game(group_id) is game:
+            controller.keep(timeout=self.game_timeout, reset_timeout=True)
+
     # 🎯 游戏会话控制
     async def _start_game_session(
-            self, event: AstrMessageEvent, group_id: str, answer: str
+        self, event: AstrMessageEvent, group_id: str, answer: str
     ):
         """启动游戏会话控制"""
+        task = asyncio.current_task()
+        if task is not None:
+            self._session_tasks.add(task)
         try:
 
             @session_waiter(timeout=self.game_timeout, record_history_chains=False)
             async def game_session_waiter(
-                    controller: SessionController, event: AstrMessageEvent
+                controller: SessionController, event: AstrMessageEvent
             ):
                 try:
                     # 从游戏状态获取答案，确保变量可用
@@ -1367,7 +1596,6 @@ class SoupaiPlugin(Star):
                         controller.keep(timeout=self.game_timeout, reset_timeout=True)
                         return
                     if user_input in ("/提示", "提示"):
-
                         async for result in self.hint_command(event):
                             await event.send(result)
                         controller.keep(timeout=self.game_timeout, reset_timeout=True)
@@ -1430,6 +1658,23 @@ class SoupaiPlugin(Star):
                             self.game_state.end_game(group_id)
                         controller.stop()
                         return
+
+                    # 特殊处理 /查看进度 指令（查看汤底真相进度）
+                    if user_input in ("/查看进度", "查看进度"):
+                        game = self.game_state.get_game(group_id)
+                        if game and game.get("knowed_answer"):
+                            await event.send(
+                                event.plain_result(
+                                    f"📍 汤底真相进度如下：\n{game['knowed_answer']}"
+                                )
+                            )
+                        else:
+                            await event.send(
+                                event.plain_result("汤底真相进度功能未启用或暂无进度")
+                            )
+                        controller.keep(timeout=self.game_timeout, reset_timeout=True)
+                        return
+
                     # Step 1: 检查是否是 /开头的命令，如果是则忽略，让指令处理器处理
                     if user_input.startswith("/"):
                         # 不处理指令，让事件继续传播到指令处理器
@@ -1450,41 +1695,9 @@ class SoupaiPlugin(Star):
                         )
                         return
 
-
-                    # 处理游戏问答消息
-                    command_part = user_input.strip()  # 直接使用 plain_text
-                    logger.info(f"处理游戏问答消息: '{command_part}'")
-
-                    # 使用 LLM 判断回答（是否问答）
-                    logger.info(f"使用 LLM 判断游戏问答: '{command_part}'")
-                    reply = await self.judge_question(command_part, current_answer)
-
-                    # 记录提问和回答
-                    if game is not None:
-                        history = game.setdefault("qa_history", [])
-                        history.append({"question": command_part, "answer": reply})
-
-                    # 更新问题计数
-                    if question_limit is not None and game is not None:
-                        game["question_count"] = game.get("question_count", 0) + 1
-                        # 将判断结果和使用次数合并到一条消息中
-                        combined_reply = (
-                            f"{reply}（{game['question_count']}/{question_limit}）"
-                        )
-                        await event.send(event.plain_result(combined_reply))
-
-                        if game["question_count"] >= question_limit:
-                            await event.send(
-                                event.plain_result(
-                                    "❗️提问次数已用完，将进入验证环节。你有2次验证机会，请使用 /验证 <推理内容>。"
-                                )
-                            )
-                    else:
-                        # 如果没有问题限制，只发送判断结果
-                        await event.send(event.plain_result(reply))
-
-                    # 重置超时时间
-                    controller.keep(timeout=self.game_timeout, reset_timeout=True)
+                    await self._handle_question_in_session(
+                        event, group_id, controller, user_input.strip()
+                    )
 
                 except Exception as e:
                     logger.error(f"会话控制内部错误: {e}")
@@ -1495,7 +1708,9 @@ class SoupaiPlugin(Star):
 
             try:
                 # 使用群 ID 限制会话范围，避免多个群并发时互相触发
-                await game_session_waiter(event, session_filter=GroupSessionFilter(group_id))
+                await game_session_waiter(
+                    event, session_filter=GroupSessionFilter(group_id)
+                )
             except TimeoutError:
                 game = self.game_state.get_game(group_id)
                 if game:
@@ -1512,6 +1727,8 @@ class SoupaiPlugin(Star):
         except Exception as e:
             logger.error(f"启动游戏会话失败: {e}")
             await event.send(event.plain_result(f"启动游戏会话失败：{e}"))
+        finally:
+            self._session_tasks.discard(task)
 
     def _is_at_bot(self, event: AstrMessageEvent) -> bool:
         """检查消息是否@了bot"""
@@ -1522,7 +1739,7 @@ class SoupaiPlugin(Star):
                 return True
         return False
 
-    async def get_story_by_strategy(self, strategy: str) -> Optional[Tuple[str, str]]:
+    async def get_story_by_strategy(self, strategy: str) -> tuple[str, str] | None:
         """根据策略获取故事，返回 (puzzle, answer) 或 None"""
         import random
 
@@ -1644,50 +1861,52 @@ class SoupaiPlugin(Star):
 
         return None
 
-    async def get_story_by_index(self, source_type: str, index: int) -> Optional[Tuple[str, str]]:
+    async def get_story_by_index(
+        self, source_type: str, index: int
+    ) -> tuple[str, str] | None:
         """根据索引获取特定故事
-        
+
         Args:
             source_type: "network" - 网络题库, "current" - 当前策略题库, "custom" - 自定义题库
             index: 题目索引（从0开始）
-        
+
         Returns:
             (puzzle, answer) 或 None
         """
         self._ensure_story_storages()
-        
+
         if source_type == "network":
             # 从网络题库获取指定索引的故事
             if index < 0 or index >= len(self.online_story_storage.stories):
                 return None
-            
+
             story = self.online_story_storage.stories[index]
             # 标记为已使用
             with self.online_story_storage.lock:
                 self.online_story_storage.used_indexes.add(index)
                 self.online_story_storage.save_usage_record()
-            
+
             logger.info(f"从网络题库获取指定故事，索引: {index}")
             return story["puzzle"], story["answer"]
-            
+
         elif source_type == "custom":
             # 从自定义题库获取指定索引的故事
             if index < 0 or index >= len(self.custom_story_storage.stories):
                 return None
-            
+
             story = self.custom_story_storage.stories[index]
             # 标记为已使用
             with self.custom_story_storage.lock:
                 self.custom_story_storage.used_indexes.add(index)
                 self.custom_story_storage.save_usage_record()
-            
+
             logger.info(f"从自定义题库获取指定故事，索引: {index}")
             return story["puzzle"], story["answer"]
-            
+
         elif source_type == "current":
             # 根据当前策略获取指定索引的故事
             strategy = self.puzzle_source_strategy
-            
+
             if strategy == "network_first":
                 # 优先检查网络题库
                 if index < len(self.online_story_storage.stories):
@@ -1697,30 +1916,34 @@ class SoupaiPlugin(Star):
                         self.online_story_storage.save_usage_record()
                     logger.info(f"从网络题库获取指定故事，索引: {index}")
                     return story["puzzle"], story["answer"]
-                
+
                 # 然后检查本地存储库
                 local_index = index - len(self.online_story_storage.stories)
-                if local_index >= 0 and local_index < len(self.local_story_storage.stories):
+                if local_index >= 0 and local_index < len(
+                    self.local_story_storage.stories
+                ):
                     story = self.local_story_storage.stories[local_index]
                     with self.local_story_storage.lock:
                         self.local_story_storage.used_indexes.add(local_index)
                         self.local_story_storage.save_usage_record()
                     logger.info(f"从本地存储库获取指定故事，索引: {local_index}")
                     return story["puzzle"], story["answer"]
-                
+
                 # 然后检查自定义题库
                 custom_index = local_index - len(self.local_story_storage.stories)
-                if custom_index >= 0 and custom_index < len(self.custom_story_storage.stories):
+                if custom_index >= 0 and custom_index < len(
+                    self.custom_story_storage.stories
+                ):
                     story = self.custom_story_storage.stories[custom_index]
                     with self.custom_story_storage.lock:
                         self.custom_story_storage.used_indexes.add(custom_index)
                         self.custom_story_storage.save_usage_record()
                     logger.info(f"从自定义题库获取指定故事，索引: {custom_index}")
                     return story["puzzle"], story["answer"]
-                
+
                 # 超出范围，返回None
                 return None
-                
+
             elif strategy == "local_first":
                 # 优先检查本地存储库
                 if index < len(self.local_story_storage.stories):
@@ -1730,30 +1953,34 @@ class SoupaiPlugin(Star):
                         self.local_story_storage.save_usage_record()
                     logger.info(f"从本地存储库获取指定故事，索引: {index}")
                     return story["puzzle"], story["answer"]
-                
+
                 # 然后检查网络题库
                 network_index = index - len(self.local_story_storage.stories)
-                if network_index >= 0 and network_index < len(self.online_story_storage.stories):
+                if network_index >= 0 and network_index < len(
+                    self.online_story_storage.stories
+                ):
                     story = self.online_story_storage.stories[network_index]
                     with self.online_story_storage.lock:
                         self.online_story_storage.used_indexes.add(network_index)
                         self.online_story_storage.save_usage_record()
                     logger.info(f"从网络题库获取指定故事，索引: {network_index}")
                     return story["puzzle"], story["answer"]
-                
+
                 # 然后检查自定义题库
                 custom_index = network_index - len(self.online_story_storage.stories)
-                if custom_index >= 0 and custom_index < len(self.custom_story_storage.stories):
+                if custom_index >= 0 and custom_index < len(
+                    self.custom_story_storage.stories
+                ):
                     story = self.custom_story_storage.stories[custom_index]
                     with self.custom_story_storage.lock:
                         self.custom_story_storage.used_indexes.add(custom_index)
                         self.custom_story_storage.save_usage_record()
                     logger.info(f"从自定义题库获取指定故事，索引: {custom_index}")
                     return story["puzzle"], story["answer"]
-                
+
                 # 超出范围，返回None
                 return None
-                
+
             elif strategy == "custom_first":
                 # 优先检查自定义题库
                 if index < len(self.custom_story_storage.stories):
@@ -1763,30 +1990,34 @@ class SoupaiPlugin(Star):
                         self.custom_story_storage.save_usage_record()
                     logger.info(f"从自定义题库获取指定故事，索引: {index}")
                     return story["puzzle"], story["answer"]
-                
+
                 # 然后检查本地存储库
                 local_index = index - len(self.custom_story_storage.stories)
-                if local_index >= 0 and local_index < len(self.local_story_storage.stories):
+                if local_index >= 0 and local_index < len(
+                    self.local_story_storage.stories
+                ):
                     story = self.local_story_storage.stories[local_index]
                     with self.local_story_storage.lock:
                         self.local_story_storage.used_indexes.add(local_index)
                         self.local_story_storage.save_usage_record()
                     logger.info(f"从本地存储库获取指定故事，索引: {local_index}")
                     return story["puzzle"], story["answer"]
-                
+
                 # 然后检查网络题库
                 network_index = local_index - len(self.local_story_storage.stories)
-                if network_index >= 0 and network_index < len(self.online_story_storage.stories):
+                if network_index >= 0 and network_index < len(
+                    self.online_story_storage.stories
+                ):
                     story = self.online_story_storage.stories[network_index]
                     with self.online_story_storage.lock:
                         self.online_story_storage.used_indexes.add(network_index)
                         self.online_story_storage.save_usage_record()
                     logger.info(f"从网络题库获取指定故事，索引: {network_index}")
                     return story["puzzle"], story["answer"]
-                
+
                 # 超出范围，返回None
                 return None
-                
+
             elif strategy == "random":
                 # 对于随机策略，我们无法准确知道索引对应哪个题库
                 # 这里我们按顺序检查：先网络题库，再本地存储库，最后自定义题库
@@ -1797,36 +2028,39 @@ class SoupaiPlugin(Star):
                         self.online_story_storage.save_usage_record()
                     logger.info(f"从网络题库获取指定故事，索引: {index}")
                     return story["puzzle"], story["answer"]
-                
+
                 local_index = index - len(self.online_story_storage.stories)
-                if local_index >= 0 and local_index < len(self.local_story_storage.stories):
+                if local_index >= 0 and local_index < len(
+                    self.local_story_storage.stories
+                ):
                     story = self.local_story_storage.stories[local_index]
                     with self.local_story_storage.lock:
                         self.local_story_storage.used_indexes.add(local_index)
                         self.local_story_storage.save_usage_record()
                     logger.info(f"从本地存储库获取指定故事，索引: {local_index}")
                     return story["puzzle"], story["answer"]
-                
+
                 custom_index = local_index - len(self.local_story_storage.stories)
-                if custom_index >= 0 and custom_index < len(self.custom_story_storage.stories):
+                if custom_index >= 0 and custom_index < len(
+                    self.custom_story_storage.stories
+                ):
                     story = self.custom_story_storage.stories[custom_index]
                     with self.custom_story_storage.lock:
                         self.custom_story_storage.used_indexes.add(custom_index)
                         self.custom_story_storage.save_usage_record()
                     logger.info(f"从自定义题库获取指定故事，索引: {custom_index}")
                     return story["puzzle"], story["answer"]
-                
+
                 # 超出范围，返回None
                 return None
-        
+
         return None
 
     async def _handle_game_status_in_session(
-            self, event: AstrMessageEvent, group_id: str
+        self, event: AstrMessageEvent, group_id: str
     ):
         """在会话控制中处理游戏状态查询逻辑"""
         try:
-
             if self.game_state.is_game_active(group_id):
                 game = self.game_state.get_game(group_id)
                 difficulty = game.get("difficulty", "普通")
@@ -1835,7 +2069,11 @@ class SoupaiPlugin(Star):
                 hint_count = game.get("hint_count", 0)
                 hint_limit = game.get("hint_limit")
 
-                question_info = f"{question_count}/{question_limit}" if question_limit else f"{question_count}/∞"
+                question_info = (
+                    f"{question_count}/{question_limit}"
+                    if question_limit
+                    else f"{question_count}/∞"
+                )
                 hint_info = f"{hint_count}/{hint_limit}" if hint_limit else "不可用"
 
                 await event.send(
@@ -1855,11 +2093,10 @@ class SoupaiPlugin(Star):
             await event.send(event.plain_result(f"查询游戏状态时发生错误：{e}"))
 
     async def _handle_force_end_in_session(
-            self, event: AstrMessageEvent, group_id: str
+        self, event: AstrMessageEvent, group_id: str
     ):
         """在会话控制中处理强制结束游戏逻辑"""
         try:
-
             if self.game_state.end_game(group_id):
                 await event.send(event.plain_result("✅ 已强制结束当前海龟汤游戏"))
             else:
@@ -1870,12 +2107,10 @@ class SoupaiPlugin(Star):
             await event.send(event.plain_result(f"强制结束游戏时发生错误：{e}"))
 
     async def _handle_view_history_in_session(
-            self, event: AstrMessageEvent, group_id: str
+        self, event: AstrMessageEvent, group_id: str
     ):
         """在会话控制中处理查看历史记录逻辑"""
         try:
-
-
             game = self.game_state.get_game(group_id)
             if not game:
                 await event.send(event.plain_result("无法获取游戏状态"))
@@ -1899,8 +2134,8 @@ class SoupaiPlugin(Star):
             await event.send(event.plain_result(f"查看历史记录时发生错误：{e}"))
 
     async def _build_hint_result(
-            self, event: AstrMessageEvent, group_id: str
-    ) -> Optional[MessageEventResult]:
+        self, event: AstrMessageEvent, group_id: str
+    ) -> MessageEventResult | None:
         """生成提示结果，供指令或会话控制调用"""
         if not group_id:
             return event.plain_result("提示功能只能在群聊中使用")
@@ -1934,61 +2169,73 @@ class SoupaiPlugin(Star):
         return event.plain_result(f"提示：{hint}{suffix}")
 
     async def _handle_verification_in_session(
-            self, event: AstrMessageEvent, user_guess: str, answer: str
-    ):
-        """在会话控制中处理验证逻辑"""
-        try:
+        self,
+        event: AstrMessageEvent,
+        user_guess: str,
+        answer: str,
+    ) -> None:
+        """Verify and consume an attempt only after a valid, current result.
 
-            # 验证用户推理
-            result = await self.verify_user_guess(user_guess, answer)
-
-            group_id = event.get_group_id()
-            game = self.game_state.get_game(group_id) if group_id else None
-            accept_levels = (
-                game.get("accept_levels", ["完全还原", "核心推理正确"])
-                if game
-                else ["完全还原", "核心推理正确"]
-            )
-            is_correct = result.level in accept_levels
-
-            # 返回验证结果
-            response = f"等级：{result.level}\n评价：{result.comment}"
-            await event.send(event.plain_result(response))
-
-            if is_correct:
-                await event.send(
-                    event.plain_result(
-                        f"🎉 恭喜！你猜中了！\n\n📖 完整故事：{answer}\n\n游戏结束！"
-                    )
+        Args:
+            event: Current player event.
+            user_guess: Submitted complete explanation.
+            answer: Original solution of the current game.
+        """
+        group_id = event.get_group_id()
+        game = self.game_state.get_game(group_id) if group_id else None
+        if game is None:
+            return
+        limit = game.get("question_limit")
+        exhausted = limit is not None and game.get("question_count", 0) >= limit
+        counter = (
+            "verification_attempts" if exhausted else "early_verification_attempts"
+        )
+        limited = game.get("difficulty", "普通") != "简单"
+        if limited and game.get(counter, 0) >= 2:
+            await event.send(event.plain_result("已经没有验证次数了。"))
+            return
+        result = await self.verify_user_guess(
+            user_guess,
+            answer,
+            puzzle=game["puzzle"],
+            game=game,
+            umo=event.unified_msg_origin,
+        )
+        if self.game_state.get_game(group_id) is not game:
+            return
+        judgment = result.judgment
+        if judgment is None or judgment.status != "ok":
+            await event.send(event.plain_result(result.comment))
+            return
+        notices = []
+        for correction in judgment.corrections:
+            item = game["qa_history"][correction["index"] - 1]
+            if item["answer"] != correction["answer"]:
+                item.setdefault("original_answer", item["answer"])
+                item["answer"] = correction["answer"]
+                notices.append(
+                    f"更正第{correction['index']}问：{correction['answer']}。"
                 )
-                if group_id:
-                    self.game_state.end_game(group_id)
-                return
-
-            if (
-                    game
-                    and game.get("question_limit") is not None
-                    and game.get("question_count", 0) >= game.get("question_limit")
-            ):
-                game["verification_attempts"] = game.get("verification_attempts", 0) + 1
-                remaining = 2 - game["verification_attempts"]
-                if remaining > 0:
-                    await event.send(
-                        event.plain_result(
-                            f"❌ 验证未通过，你还有 {remaining} 次机会。"
-                        )
-                    )
-                else:
-                    await event.send(
-                        event.plain_result(
-                            f"❌ 验证未通过。\n\n📖 完整故事：{answer}\n\n游戏结束！"
-                        )
-                    )
-                    self.game_state.end_game(group_id)
-
-        except Exception as e:
-            logger.error(f"会话验证失败: {e}")
-            await event.send(event.plain_result(f"验证过程中发生错误：{e}"))
+        if limited:
+            game[counter] = game.get(counter, 0) + 1
+        response = "\n".join(
+            [*notices, f"等级：{result.level}\n评价：{result.comment}"]
+        )
+        if result.level in game.get("accept_levels", ["完全还原"]):
+            self.game_state.end_game(group_id)
+            response += (
+                f"\n\n🎉 恭喜！你猜中了！\n\n📖 完整故事：{answer}\n\n游戏结束！"
+            )
+        elif limited:
+            remaining = 2 - game[counter]
+            if exhausted and remaining == 0:
+                self.game_state.end_game(group_id)
+                response += (
+                    f"\n\n❌ 验证未通过。\n\n📖 完整故事：{answer}\n\n游戏结束！"
+                )
+            else:
+                response += f"\n\n验证未通过，本阶段剩余 {remaining} 次验证机会。"
+        await event.send(event.plain_result(response))
 
     # 📊 游戏状态查询
     @filter.command("汤状态")
@@ -2008,7 +2255,11 @@ class SoupaiPlugin(Star):
             hint_count = game.get("hint_count", 0)
             hint_limit = game.get("hint_limit")
 
-            question_info = f"{question_count}/{question_limit}" if question_limit else f"{question_count}/∞"
+            question_info = (
+                f"{question_count}/{question_limit}"
+                if question_limit
+                else f"{question_count}/∞"
+            )
             hint_info = f"{hint_count}/{hint_limit}" if hint_limit else "不可用"
 
             yield event.plain_result(
@@ -2094,20 +2345,20 @@ class SoupaiPlugin(Star):
             user_input = event.message_str.strip()
             # 只拦截非本插件的指令，避免阻断自己的指令
             if (
-                    user_input.startswith("/")
-                    and not user_input.startswith("/备用结束")
-                    and not user_input.startswith("/汤")
-                    and not user_input.startswith("/揭晓")
-                    and not user_input.startswith("/验证")
-                    and not user_input.startswith("/汤状态")
-                    and not user_input.startswith("/强制结束")
-                    and not user_input.startswith("/备用开始")
-                    and not user_input.startswith("/备用状态")
-                    and not user_input.startswith("/汤配置")
-                    and not user_input.startswith("/重置题库")
-                    and not user_input.startswith("/题库详情")
-                    and not user_input.startswith("/查看")
-                    and not user_input.startswith("/提示")
+                user_input.startswith("/")
+                and not user_input.startswith("/备用结束")
+                and not user_input.startswith("/汤")
+                and not user_input.startswith("/揭晓")
+                and not user_input.startswith("/验证")
+                and not user_input.startswith("/汤状态")
+                and not user_input.startswith("/强制结束")
+                and not user_input.startswith("/备用开始")
+                and not user_input.startswith("/备用状态")
+                and not user_input.startswith("/汤配置")
+                and not user_input.startswith("/重置题库")
+                and not user_input.startswith("/题库详情")
+                and not user_input.startswith("/查看")
+                and not user_input.startswith("/提示")
             ):
                 yield event.plain_result(
                     "⚠️ 系统正在生成备用故事，请稍后再试或使用 /备用结束 停止生成"
@@ -2132,7 +2383,6 @@ class SoupaiPlugin(Star):
         storage_info = self.local_story_storage.get_storage_info()
         online_info = self.online_story_storage.get_storage_info()
         status = "🟢 运行中" if self.auto_generating else "🔴 已停止"
-
 
         # 检查存储库是否已满
         storage_full_warning = ""
@@ -2167,7 +2417,6 @@ class SoupaiPlugin(Star):
         self.local_story_storage.reset_usage()
         local_info = self.local_story_storage.get_storage_info()
 
-
         message = (
             f"✅ 题库使用记录已重置！\n"
             f"• 网络题库：{online_info['total']} 个谜题 (已重置)\n"
@@ -2192,7 +2441,6 @@ class SoupaiPlugin(Star):
         # 获取本地存储库详细信息
         local_info = self.local_story_storage.get_storage_info()
         local_usage = self.local_story_storage.get_usage_info()
-
 
         # 安全计算使用率，避免除零错误
         online_usage_rate = (
@@ -2279,7 +2527,8 @@ class SoupaiPlugin(Star):
         config_info = (
             f"⚙️ 海龟汤插件配置：\n"
             f"• 生成谜题 LLM：{self.generate_llm_provider_id or '默认'}\n"
-            f"• 判断问答 LLM：{self.judge_llm_provider_id or '默认'}\n"
+            f"• 判断问答 LLM：{self.judge_llm_provider_id or '当前会话默认'}\n"
+            f"• 独立复核 LLM：{self.review_llm_provider_id or '复用判断模型'}\n"
             f"• 游戏超时：{self.game_timeout} 秒\n"
             f"• 网络题库：{online_info['total']} 个谜题 (已用: {online_info['used']}, 剩余: {online_info['available']})\n"
             f"• 本地存储库：{local_info['total']}/{local_info['max_size']} (已用: {local_info['used']}, 剩余: {local_info['remaining']})\n"
@@ -2292,26 +2541,28 @@ class SoupaiPlugin(Star):
     @filter.command("添加海龟汤")
     async def add_custom_soupai(self, event: AstrMessageEvent, content: str):
         """添加自定义海龟汤故事，格式: /添加海龟汤 <汤面>|<汤底>"""
-        
+
         # 确保自定义存储库已初始化
         self._ensure_story_storages()
-        
+
         # 解析内容格式: 汤面|汤底
         if "|" not in content:
-            yield event.plain_result("❌ 格式错误！请使用格式: /添加海龟汤 <汤面>|<汤底>")
+            yield event.plain_result(
+                "❌ 格式错误！请使用格式: /添加海龟汤 <汤面>|<汤底>"
+            )
             return
-        
+
         puzzle, answer = content.split("|", 1)
         puzzle = puzzle.strip()
         answer = answer.strip()
-        
+
         if not puzzle or not answer:
             yield event.plain_result("❌ 汤面和汤底都不能为空！")
             return
-        
+
         # 添加故事到自定义存储库
         success = self.custom_story_storage.add_story(puzzle, answer)
-        
+
         if success:
             # 获取添加后的故事索引
             story_index = len(self.custom_story_storage.stories) - 1
